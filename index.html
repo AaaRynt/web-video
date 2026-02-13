@@ -3,6 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Generate by GPT-5.3-Codex" />
     <title>Camera Preview + PiP</title>
     <style>
       :root {
@@ -26,6 +27,7 @@
         position: relative;
         width: 100vw;
         height: 100vh;
+        height: 100dvh;
         overflow: hidden;
       }
 
@@ -85,78 +87,412 @@
         <button id="pipButton" type="button">进入画中画</button>
       </div>
 
-      <div class="status" id="status">正在请求摄像头权限...</div>
+      <div class="status" id="status">初始化中...</div>
     </main>
 
-    <script>
-      const video = document.getElementById('preview')
-      const pipButton = document.getElementById('pipButton')
-      const statusText = document.getElementById('status')
+    <script type="module">
+      const State = Object.freeze({
+        INIT: 'INIT',
+        LOADING: 'LOADING',
+        READY: 'READY',
+        PIP: 'PIP',
+        ERROR: 'ERROR',
+      })
 
-      function setStatus(text) {
-        statusText.textContent = text
+      const UiMessage = Object.freeze({
+        INIT: '初始化中...',
+        LOADING: '正在请求摄像头权限...',
+        READY: '摄像头已连接',
+        PIP: '已进入画中画',
+        HIDDEN_RELEASED: '页面不可见，摄像头已释放',
+        NO_MEDIA_DEVICES: '当前浏览器不支持 MediaDevices API',
+        INSECURE_CONTEXT: '请在 HTTPS 或 localhost 环境下使用摄像头',
+        PERMISSION_DENIED: '用户拒绝了摄像头权限',
+        CAMERA_NOT_FOUND: '未检测到可用摄像头',
+        CAMERA_BUSY: '摄像头被其他应用占用',
+        PIP_NOT_SUPPORTED: '当前浏览器不支持 Picture-in-Picture',
+        PIP_NOT_READY: '视频尚未准备好，无法进入画中画',
+        PIP_FAILED: '画中画操作失败，请重试',
+        UNKNOWN_ERROR: '发生未知错误，请稍后重试',
+      })
+
+      const ErrorCode = Object.freeze({
+        NO_MEDIA_DEVICES: 'NO_MEDIA_DEVICES',
+        INSECURE_CONTEXT: 'INSECURE_CONTEXT',
+        PERMISSION_DENIED: 'PERMISSION_DENIED',
+        CAMERA_NOT_FOUND: 'CAMERA_NOT_FOUND',
+        CAMERA_BUSY: 'CAMERA_BUSY',
+        PIP_NOT_SUPPORTED: 'PIP_NOT_SUPPORTED',
+        PIP_NOT_READY: 'PIP_NOT_READY',
+        PIP_FAILED: 'PIP_FAILED',
+        UNKNOWN_ERROR: 'UNKNOWN_ERROR',
+      })
+
+      const el = {
+        video: document.getElementById('preview'),
+        pipButton: document.getElementById('pipButton'),
+        status: document.getElementById('status'),
       }
 
-      function updatePipButton() {
-        pipButton.textContent = document.pictureInPictureElement ? '退出画中画' : '进入画中画'
+      const stateModel = {
+        state: State.INIT,
+        reason: null,
+        errorCode: null,
+        pipSupported: Boolean(document.pictureInPictureEnabled),
+        videoReady: false,
+        actionLocked: false,
       }
 
-      async function startCamera() {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          throw new Error('当前浏览器不支持 getUserMedia')
+      function setState(nextState, payload = {}) {
+        stateModel.state = nextState
+        stateModel.reason = payload.reason ?? null
+        stateModel.errorCode = payload.errorCode ?? null
+        render()
+      }
+
+      function setActionLock(locked) {
+        stateModel.actionLocked = locked
+        render()
+      }
+
+      function setVideoReady(ready) {
+        stateModel.videoReady = ready
+        render()
+      }
+
+      function getErrorMessage(errorCode) {
+        switch (errorCode) {
+          case ErrorCode.NO_MEDIA_DEVICES:
+            return UiMessage.NO_MEDIA_DEVICES
+          case ErrorCode.INSECURE_CONTEXT:
+            return UiMessage.INSECURE_CONTEXT
+          case ErrorCode.PERMISSION_DENIED:
+            return UiMessage.PERMISSION_DENIED
+          case ErrorCode.CAMERA_NOT_FOUND:
+            return UiMessage.CAMERA_NOT_FOUND
+          case ErrorCode.CAMERA_BUSY:
+            return UiMessage.CAMERA_BUSY
+          case ErrorCode.PIP_NOT_SUPPORTED:
+            return UiMessage.PIP_NOT_SUPPORTED
+          case ErrorCode.PIP_NOT_READY:
+            return UiMessage.PIP_NOT_READY
+          case ErrorCode.PIP_FAILED:
+            return UiMessage.PIP_FAILED
+          default:
+            return UiMessage.UNKNOWN_ERROR
+        }
+      }
+
+      function getStatusText() {
+        if (stateModel.state === State.ERROR) {
+          return getErrorMessage(stateModel.errorCode)
         }
 
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: true,
-          audio: false,
-        })
+        if (stateModel.state === State.INIT && stateModel.reason === 'HIDDEN_RELEASED') {
+          return UiMessage.HIDDEN_RELEASED
+        }
 
-        video.srcObject = stream
-        await video.play()
-        setStatus('摄像头已连接')
+        switch (stateModel.state) {
+          case State.LOADING:
+            return UiMessage.LOADING
+          case State.READY:
+            return UiMessage.READY
+          case State.PIP:
+            return UiMessage.PIP
+          case State.INIT:
+          default:
+            return UiMessage.INIT
+        }
       }
 
-      async function togglePiP() {
-        if (!document.pictureInPictureEnabled) {
-          setStatus('当前浏览器不支持 Picture-in-Picture')
+      function render() {
+        el.status.textContent = getStatusText()
+
+        const inPip = document.pictureInPictureElement === el.video
+        el.pipButton.textContent = inPip ? '退出画中画' : '进入画中画'
+
+        if (!stateModel.pipSupported) {
+          el.pipButton.hidden = true
           return
         }
 
+        el.pipButton.hidden = false
+
+        const stateAllowsPip =
+          stateModel.state === State.READY ||
+          stateModel.state === State.PIP ||
+          (stateModel.state === State.ERROR && Boolean(mediaStream))
+
+        const canUsePip = stateAllowsPip && stateModel.videoReady && !stateModel.actionLocked
+
+        el.pipButton.disabled = !canUsePip
+      }
+
+      const cameraConstraints = {
+        video: {
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+        },
+        audio: false,
+      }
+
+      let mediaStream = null
+      let requestToken = 0
+
+      function isLocalHost(hostname) {
+        return (
+          hostname === 'localhost' ||
+          hostname === '127.0.0.1' ||
+          hostname === '[::1]' ||
+          hostname.endsWith('.localhost')
+        )
+      }
+
+      function isSecureCameraContext() {
+        return window.isSecureContext || isLocalHost(window.location.hostname)
+      }
+
+      function streamHasLiveTrack(stream) {
+        return stream.getTracks().some((track) => track.readyState === 'live')
+      }
+
+      function stopTracks(stream) {
+        for (const track of stream.getTracks()) {
+          track.stop()
+        }
+      }
+
+      function mapGetUserMediaError(error) {
+        switch (error?.name) {
+          case 'NotAllowedError':
+            return ErrorCode.PERMISSION_DENIED
+          case 'NotFoundError':
+            return ErrorCode.CAMERA_NOT_FOUND
+          case 'NotReadableError':
+            return ErrorCode.CAMERA_BUSY
+          default:
+            return ErrorCode.UNKNOWN_ERROR
+        }
+      }
+
+      function checkPrerequisites() {
+        if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== 'function') {
+          return { ok: false, errorCode: ErrorCode.NO_MEDIA_DEVICES }
+        }
+
+        if (!isSecureCameraContext()) {
+          return { ok: false, errorCode: ErrorCode.INSECURE_CONTEXT }
+        }
+
+        return { ok: true, errorCode: null }
+      }
+
+      async function stopCamera({ reason = null, keepErrorState = false } = {}) {
+        const token = ++requestToken
+        setActionLock(false)
+        const streamToStop = mediaStream
+
+        if (document.pictureInPictureElement === el.video) {
+          try {
+            await document.exitPictureInPicture()
+          } catch (error) {
+            // Ignore exit errors during shutdown.
+          }
+        }
+
+        if (token !== requestToken) {
+          if (streamToStop && streamToStop !== mediaStream) {
+            stopTracks(streamToStop)
+          }
+          return
+        }
+
+        if (streamToStop) {
+          stopTracks(streamToStop)
+          if (mediaStream === streamToStop) {
+            mediaStream = null
+          }
+        }
+
+        el.video.pause()
+        el.video.srcObject = null
+        setVideoReady(false)
+
+        if (!keepErrorState) {
+          setState(State.INIT, { reason })
+        }
+      }
+
+      async function startCamera() {
+        if (stateModel.state === State.LOADING) {
+          return
+        }
+
+        const precheck = checkPrerequisites()
+        if (!precheck.ok) {
+          setState(State.ERROR, { errorCode: precheck.errorCode })
+          return
+        }
+
+        if (mediaStream && streamHasLiveTrack(mediaStream)) {
+          setState(State.READY)
+          return
+        }
+
+        const token = ++requestToken
+        setState(State.LOADING)
+        setActionLock(true)
+
         try {
-          if (document.pictureInPictureElement) {
+          const stream = await navigator.mediaDevices.getUserMedia(cameraConstraints)
+
+          if (token !== requestToken) {
+            stopTracks(stream)
+            return
+          }
+
+          mediaStream = stream
+          el.video.srcObject = stream
+
+          try {
+            await el.video.play()
+          } catch (error) {
+            if (token === requestToken) {
+              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+            }
+            return
+          }
+
+          if (token !== requestToken) {
+            stopTracks(stream)
+            mediaStream = null
+            return
+          }
+
+          if (el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+            setVideoReady(true)
+          }
+
+          setState(State.READY)
+        } catch (error) {
+          if (token === requestToken) {
+            setState(State.ERROR, { errorCode: mapGetUserMediaError(error) })
+          }
+        } finally {
+          if (token === requestToken) {
+            setActionLock(false)
+          }
+        }
+      }
+
+      async function togglePictureInPicture() {
+        if (stateModel.actionLocked) {
+          return
+        }
+
+        if (!stateModel.pipSupported) {
+          setState(State.ERROR, { errorCode: ErrorCode.PIP_NOT_SUPPORTED })
+          return
+        }
+
+        if (!stateModel.videoReady || !mediaStream) {
+          setState(State.ERROR, { errorCode: ErrorCode.PIP_NOT_READY })
+          return
+        }
+
+        setActionLock(true)
+
+        try {
+          if (document.pictureInPictureElement === el.video) {
             await document.exitPictureInPicture()
             return
           }
 
-          if (video.readyState < 2) {
-            await video.play()
+          if (el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            setState(State.ERROR, { errorCode: ErrorCode.PIP_NOT_READY })
+            return
           }
 
-          await video.requestPictureInPicture()
+          await el.video.requestPictureInPicture()
         } catch (error) {
-          setStatus(`PiP 操作失败: ${error.message}`)
+          setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
+        } finally {
+          setActionLock(false)
         }
       }
 
-      pipButton.addEventListener('click', togglePiP)
+      function bindEvents() {
+        // document.addEventListener('keydown', (e) => {
+        //   if (e.key === 'Enter') {
+        //     togglePictureInPicture().catch(() => {
+        //       setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
+        //     })
+        //   }
+        // })
+        el.pipButton.addEventListener('click', () => {
+          togglePictureInPicture().catch(() => {
+            setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
+          })
+        })
 
-      video.addEventListener('enterpictureinpicture', () => {
-        updatePipButton()
-        setStatus('已进入画中画')
-      })
+        el.video.addEventListener('loadeddata', () => {
+          setVideoReady(el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)
+        })
 
-      video.addEventListener('leavepictureinpicture', () => {
-        updatePipButton()
-        setStatus('已退出画中画')
-      })
+        el.video.addEventListener('enterpictureinpicture', () => {
+          setState(State.PIP)
+        })
 
-      if (!document.pictureInPictureEnabled) {
-        pipButton.disabled = true
-        setStatus('摄像头准备中（浏览器不支持 PiP）')
+        el.video.addEventListener('leavepictureinpicture', () => {
+          if (mediaStream && stateModel.videoReady) {
+            setState(State.READY)
+            return
+          }
+
+          setState(State.INIT)
+        })
+
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'hidden') {
+            stopCamera({ reason: 'HIDDEN_RELEASED' }).catch(() => {
+              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+            })
+            return
+          }
+
+          if (document.visibilityState === 'visible') {
+            startCamera().catch(() => {
+              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+            })
+          }
+        })
+
+        window.addEventListener('beforeunload', () => {
+          if (mediaStream) {
+            stopTracks(mediaStream)
+            mediaStream = null
+          }
+        })
       }
 
-      startCamera().catch((error) => {
-        setStatus(`无法打开摄像头: ${error.message}`)
+      async function bootstrap() {
+        try {
+          render()
+          bindEvents()
+
+          if (!stateModel.pipSupported) {
+            setState(State.INIT)
+          }
+
+          await startCamera()
+        } catch (error) {
+          setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+        }
+      }
+
+      bootstrap().catch(() => {
+        setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
       })
     </script>
   </body>

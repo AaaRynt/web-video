@@ -40,6 +40,20 @@
         background: #000;
       }
 
+      video.is-mirrored {
+        transform: scaleX(-1);
+      }
+
+      .pip-source {
+        position: fixed;
+        left: -9999px;
+        top: -9999px;
+        width: 1px;
+        height: 1px;
+        opacity: 0;
+        pointer-events: none;
+      }
+
       .controls {
         position: absolute;
         right: 16px;
@@ -82,9 +96,18 @@
   <body>
     <main class="app">
       <video id="preview" autoplay playsinline muted></video>
+      <video
+        id="pipSource"
+        class="pip-source"
+        autoplay
+        playsinline
+        muted
+        aria-hidden="true"
+      ></video>
 
       <div class="controls">
-        <button id="pipButton" type="button">进入画中画</button>
+        <button id="mirrorButton" type="button">镜像预览: 关 (Space)</button>
+        <button id="pipButton" type="button">进入画中画 (Enter)</button>
       </div>
 
       <div class="status" id="status">初始化中...</div>
@@ -130,6 +153,8 @@
 
       const el = {
         video: document.getElementById('preview'),
+        pipSource: document.getElementById('pipSource'),
+        mirrorButton: document.getElementById('mirrorButton'),
         pipButton: document.getElementById('pipButton'),
         status: document.getElementById('status'),
       }
@@ -141,6 +166,7 @@
         pipSupported: Boolean(document.pictureInPictureEnabled),
         videoReady: false,
         actionLocked: false,
+        previewMirrored: false,
       }
 
       function setState(nextState, payload = {}) {
@@ -207,9 +233,12 @@
 
       function render() {
         el.status.textContent = getStatusText()
+        el.video.classList.toggle('is-mirrored', stateModel.previewMirrored)
+        el.mirrorButton.textContent =
+          stateModel.previewMirrored ? '镜像预览: 开 (Space)' : '镜像预览: 关 (Space)'
 
-        const inPip = document.pictureInPictureElement === el.video
-        el.pipButton.textContent = inPip ? '退出画中画' : '进入画中画'
+        const inPip = getPiPElementInPip()
+        el.pipButton.textContent = inPip ? '退出画中画 (Enter)' : '进入画中画 (Enter)'
 
         if (!stateModel.pipSupported) {
           el.pipButton.hidden = true
@@ -238,7 +267,128 @@
       }
 
       let mediaStream = null
+      let pipStream = null
+      let pipCanvas = null
+      let pipContext = null
+      let pipFrameRequestId = null
       let requestToken = 0
+      const supportsCanvasCapture = typeof HTMLCanvasElement.prototype.captureStream === 'function'
+
+      function getPiPElement() {
+        return supportsCanvasCapture ? el.pipSource : el.video
+      }
+
+      function getPiPElementInPip() {
+        return document.pictureInPictureElement === getPiPElement()
+      }
+
+      function ensurePipCanvasSize(width, height) {
+        if (!pipCanvas) {
+          pipCanvas = document.createElement('canvas')
+          pipContext = pipCanvas.getContext('2d')
+        }
+
+        if (!pipContext) {
+          return false
+        }
+
+        if (pipCanvas.width !== width || pipCanvas.height !== height) {
+          pipCanvas.width = width
+          pipCanvas.height = height
+        }
+
+        return true
+      }
+
+      function drawPipFrame() {
+        if (!supportsCanvasCapture || !pipContext || !pipCanvas || !stateModel.videoReady) {
+          return
+        }
+
+        const width = pipCanvas.width
+        const height = pipCanvas.height
+
+        pipContext.save()
+        pipContext.clearRect(0, 0, width, height)
+
+        if (stateModel.previewMirrored) {
+          pipContext.translate(width, 0)
+          pipContext.scale(-1, 1)
+        }
+
+        pipContext.drawImage(el.video, 0, 0, width, height)
+        pipContext.restore()
+      }
+
+      function stopPipRenderLoop() {
+        if (pipFrameRequestId !== null) {
+          cancelAnimationFrame(pipFrameRequestId)
+          pipFrameRequestId = null
+        }
+      }
+
+      function startPipRenderLoop() {
+        if (!supportsCanvasCapture || pipFrameRequestId !== null) {
+          return
+        }
+
+        const renderNextFrame = () => {
+          drawPipFrame()
+          pipFrameRequestId = requestAnimationFrame(renderNextFrame)
+        }
+
+        pipFrameRequestId = requestAnimationFrame(renderNextFrame)
+      }
+
+      function stopPipStream() {
+        if (!supportsCanvasCapture) {
+          return
+        }
+
+        stopPipRenderLoop()
+
+        if (pipStream) {
+          stopTracks(pipStream)
+          pipStream = null
+        }
+
+        el.pipSource.pause()
+        el.pipSource.srcObject = null
+      }
+
+      async function ensurePipSourceReady() {
+        if (el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          return false
+        }
+
+        if (!supportsCanvasCapture) {
+          return true
+        }
+
+        const width = el.video.videoWidth || 1280
+        const height = el.video.videoHeight || 720
+        const canvasReady = ensurePipCanvasSize(width, height)
+        if (!canvasReady) {
+          return false
+        }
+
+        if (!pipStream || !streamHasLiveTrack(pipStream)) {
+          pipStream = pipCanvas.captureStream(30)
+          el.pipSource.srcObject = pipStream
+        }
+
+        drawPipFrame()
+
+        if (el.pipSource.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          try {
+            await el.pipSource.play()
+          } catch (error) {
+            return false
+          }
+        }
+
+        return true
+      }
 
       function isLocalHost(hostname) {
         return (
@@ -293,7 +443,7 @@
         setActionLock(false)
         const streamToStop = mediaStream
 
-        if (document.pictureInPictureElement === el.video) {
+        if (getPiPElementInPip()) {
           try {
             await document.exitPictureInPicture()
           } catch (error) {
@@ -317,6 +467,7 @@
 
         el.video.pause()
         el.video.srcObject = null
+        stopPipStream()
         setVideoReady(false)
 
         if (!keepErrorState) {
@@ -404,7 +555,7 @@
         setActionLock(true)
 
         try {
-          if (document.pictureInPictureElement === el.video) {
+          if (getPiPElementInPip()) {
             await document.exitPictureInPicture()
             return
           }
@@ -414,7 +565,14 @@
             return
           }
 
-          await el.video.requestPictureInPicture()
+          const pipReady = await ensurePipSourceReady()
+          if (!pipReady) {
+            setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
+            return
+          }
+
+          startPipRenderLoop()
+          await getPiPElement().requestPictureInPicture()
         } catch (error) {
           setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
         } finally {
@@ -422,36 +580,80 @@
         }
       }
 
+      function toggleMirrorPreview() {
+        stateModel.previewMirrored = !stateModel.previewMirrored
+        if (getPiPElementInPip()) {
+          drawPipFrame()
+        }
+        render()
+      }
+
+      function isKeyboardInputTarget(target) {
+        if (!(target instanceof HTMLElement)) {
+          return false
+        }
+
+        if (target.isContentEditable) {
+          return true
+        }
+
+        const tag = target.tagName
+        return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'BUTTON'
+      }
+
       function bindEvents() {
-        // document.addEventListener('keydown', (e) => {
-        //   if (e.key === 'Enter') {
-        //     togglePictureInPicture().catch(() => {
-        //       setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
-        //     })
-        //   }
-        // })
+        el.mirrorButton.addEventListener('click', () => {
+          toggleMirrorPreview()
+        })
+
         el.pipButton.addEventListener('click', () => {
           togglePictureInPicture().catch(() => {
             setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
           })
         })
 
+        document.addEventListener('keydown', (event) => {
+          if (event.repeat || isKeyboardInputTarget(event.target)) {
+            return
+          }
+
+          if (event.code === 'Space') {
+            event.preventDefault()
+            toggleMirrorPreview()
+            return
+          }
+
+          if (event.key === 'Enter') {
+            event.preventDefault()
+            togglePictureInPicture().catch(() => {
+              setState(State.ERROR, { errorCode: ErrorCode.PIP_FAILED })
+            })
+          }
+        })
+
         el.video.addEventListener('loadeddata', () => {
           setVideoReady(el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)
         })
 
-        el.video.addEventListener('enterpictureinpicture', () => {
+        const handleEnterPiP = () => {
+          startPipRenderLoop()
           setState(State.PIP)
-        })
+        }
 
-        el.video.addEventListener('leavepictureinpicture', () => {
+        const handleLeavePiP = () => {
+          stopPipRenderLoop()
           if (mediaStream && stateModel.videoReady) {
             setState(State.READY)
             return
           }
 
           setState(State.INIT)
-        })
+        }
+
+        el.video.addEventListener('enterpictureinpicture', handleEnterPiP)
+        el.video.addEventListener('leavepictureinpicture', handleLeavePiP)
+        el.pipSource.addEventListener('enterpictureinpicture', handleEnterPiP)
+        el.pipSource.addEventListener('leavepictureinpicture', handleLeavePiP)
 
         document.addEventListener('visibilitychange', () => {
           if (document.visibilityState === 'hidden') {
@@ -473,6 +675,8 @@
             stopTracks(mediaStream)
             mediaStream = null
           }
+
+          stopPipStream()
         })
       }
 

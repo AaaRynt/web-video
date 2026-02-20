@@ -1,4 +1,4 @@
-# web-video
+# Camera-Preview-on-Browser
 
 ## 介绍
 一个轻量、纯粹的项目：可以理解为一面“_数字镜子_”，由Web Api调用，运行于桌面端浏览器环境

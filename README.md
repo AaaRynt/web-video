@@ -19,7 +19,7 @@
 
 或
 
-``` git clone
+``` bash
 git clone https://github.com/AaaRynt/web-video.git
 open index.html
 ```

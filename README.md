@@ -1,6 +1,7 @@
 # Camera-Preview-on-Browser
 
 ## 介绍
+
 一个轻量、纯粹的项目：可以理解为一面“_数字镜子_”，由Web Api调用，运行于桌面端浏览器环境
 
 支持[PiP](https://developer.mozilla.org/zh-CN/docs/Web/API/Document_Picture-in-Picture_API)、画面镜像
@@ -19,7 +20,8 @@
 
 或
 
-``` bash
-git clone https://github.com/AaaRynt/web-video.git
+```bash
+git clone https://github.com/AaaRynt/Camera-Preview-on-Browser.git
+cd Camera-Preview-on-Browser
 open index.html
 ```

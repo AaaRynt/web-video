@@ -31,6 +31,11 @@
         overflow: hidden;
       }
 
+      .layer {
+        position: absolute;
+        inset: 0;
+      }
+
       video {
         width: 100%;
         height: 100%;
@@ -42,6 +47,27 @@
 
       video.is-mirrored {
         transform: scaleX(-1);
+      }
+
+      canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+        background: #000;
+      }
+
+      #snapshot {
+        display: none;
+        pointer-events: none;
+      }
+
+      .app.is-snapshot-mode #snapshot {
+        display: block;
+      }
+
+      .app.is-snapshot-mode #preview {
+        opacity: 0;
+        pointer-events: none;
       }
 
       .pip-source {
@@ -60,7 +86,10 @@
         bottom: 16px;
         display: flex;
         gap: 10px;
+        align-items: flex-end;
         z-index: 10;
+        flex-wrap: wrap;
+        max-width: min(92vw, 520px);
       }
 
       button {
@@ -80,6 +109,46 @@
         cursor: not-allowed;
       }
 
+      .control-panel {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
+        padding: 10px 12px;
+        border-radius: 10px;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.55);
+        backdrop-filter: blur(6px);
+      }
+
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.86);
+        user-select: none;
+      }
+
+      input[type='number'] {
+        width: 150px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        background: rgba(0, 0, 0, 0.35);
+        color: #fff;
+        outline: none;
+      }
+
+      .checkbox {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        height: 34px;
+        font-size: 12px;
+        color: rgba(255, 255, 255, 0.86);
+        user-select: none;
+      }
+
       .status {
         position: absolute;
         left: 16px;
@@ -95,7 +164,8 @@
   </head>
   <body>
     <main class="app">
-      <video id="preview" autoplay playsinline muted></video>
+      <video id="preview" class="layer" autoplay playsinline muted></video>
+      <canvas id="snapshot" class="layer" aria-hidden="true"></canvas>
       <video
         id="pipSource"
         class="pip-source"
@@ -106,6 +176,29 @@
       ></video>
 
       <div class="controls">
+        <form id="refreshForm" class="control-panel">
+          <label class="field">
+            刷新间隔 (ms)
+            <input
+              id="refreshIntervalInput"
+              type="number"
+              min="0"
+              step="1"
+              inputmode="numeric"
+              placeholder="0 = 实时"
+              value="0"
+              aria-label="刷新间隔（毫秒）"
+            />
+          </label>
+          <label
+            class="checkbox"
+            title="开启后每次抓帧会关闭摄像头；适合很长的刷新间隔（例如 10 秒）"
+          >
+            <input id="releaseAfterCaptureInput" type="checkbox" checked />
+            拍完关闭摄像头
+          </label>
+          <button id="applyRefreshButton" type="submit">应用</button>
+        </form>
         <button id="mirrorButton" type="button">镜像预览: 关 (Space)</button>
         <button id="pipButton" type="button">进入画中画 (Enter)</button>
       </div>
@@ -135,6 +228,8 @@
         CAMERA_BUSY: '摄像头被其他应用占用',
         PIP_NOT_SUPPORTED: '当前浏览器不支持 Picture-in-Picture',
         PIP_NOT_READY: '视频尚未准备好，无法进入画中画',
+        CAPTURESTREAM_NOT_SUPPORTED:
+          '当前浏览器不支持 Canvas captureStream，无法在定时刷新模式下使用画中画',
         PIP_FAILED: '画中画操作失败，请重试',
         UNKNOWN_ERROR: '发生未知错误，请稍后重试',
       })
@@ -147,15 +242,21 @@
         CAMERA_BUSY: 'CAMERA_BUSY',
         PIP_NOT_SUPPORTED: 'PIP_NOT_SUPPORTED',
         PIP_NOT_READY: 'PIP_NOT_READY',
+        CAPTURESTREAM_NOT_SUPPORTED: 'CAPTURESTREAM_NOT_SUPPORTED',
         PIP_FAILED: 'PIP_FAILED',
         UNKNOWN_ERROR: 'UNKNOWN_ERROR',
       })
 
       const el = {
+        app: document.querySelector('.app'),
         video: document.getElementById('preview'),
+        snapshot: document.getElementById('snapshot'),
         pipSource: document.getElementById('pipSource'),
         mirrorButton: document.getElementById('mirrorButton'),
         pipButton: document.getElementById('pipButton'),
+        refreshForm: document.getElementById('refreshForm'),
+        refreshIntervalInput: document.getElementById('refreshIntervalInput'),
+        releaseAfterCaptureInput: document.getElementById('releaseAfterCaptureInput'),
         status: document.getElementById('status'),
       }
 
@@ -176,6 +277,11 @@
         videoReady: false,
         actionLocked: false,
         previewMirrored: false,
+        refreshIntervalMs: 0,
+        releaseAfterCapture: true,
+        timedRefreshActive: false,
+        captureInProgress: false,
+        lastCaptureAt: null,
       }
 
       function setState(nextState, payload = {}) {
@@ -211,6 +317,8 @@
             return UiMessage.PIP_NOT_SUPPORTED
           case ErrorCode.PIP_NOT_READY:
             return UiMessage.PIP_NOT_READY
+          case ErrorCode.CAPTURESTREAM_NOT_SUPPORTED:
+            return UiMessage.CAPTURESTREAM_NOT_SUPPORTED
           case ErrorCode.PIP_FAILED:
             return UiMessage.PIP_FAILED
           default:
@@ -231,13 +339,39 @@
           case State.LOADING:
             return UiMessage.LOADING
           case State.READY:
-            return UiMessage.READY
+            return formatStatusWithRefresh(UiMessage.READY)
           case State.PIP:
-            return UiMessage.PIP
+            return formatStatusWithRefresh(UiMessage.PIP)
           case State.INIT:
           default:
-            return UiMessage.INIT
+            return formatStatusWithRefresh(UiMessage.INIT)
         }
+      }
+
+      function pad2(value) {
+        return String(value).padStart(2, '0')
+      }
+
+      function formatTime(date) {
+        return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
+      }
+
+      function formatStatusWithRefresh(baseText) {
+        if (!stateModel.timedRefreshActive || stateModel.refreshIntervalMs <= 0) {
+          return baseText
+        }
+
+        const parts = [`定时刷新: ${stateModel.refreshIntervalMs}ms`]
+        if (stateModel.releaseAfterCapture) {
+          parts.push('拍完关闭摄像头')
+        }
+        if (stateModel.captureInProgress) {
+          parts.push('拍摄中...')
+        } else if (stateModel.lastCaptureAt) {
+          parts.push(`上次: ${formatTime(stateModel.lastCaptureAt)}`)
+        }
+
+        return `${baseText} · ${parts.join(' · ')}`
       }
 
       function render() {
@@ -261,7 +395,12 @@
           stateModel.state === State.PIP ||
           (stateModel.state === State.ERROR && Boolean(mediaStream))
 
-        const canUsePip = stateAllowsPip && stateModel.videoReady && !stateModel.actionLocked
+        const timedRefreshMode = stateModel.refreshIntervalMs > 0
+        const livePipAvailable = stateAllowsPip && stateModel.videoReady && Boolean(mediaStream)
+        const canUsePip =
+          inPip ||
+          (!stateModel.actionLocked &&
+            (timedRefreshMode ? supportsCanvasCapture : livePipAvailable))
 
         el.pipButton.disabled = !canUsePip
       }
@@ -277,24 +416,50 @@
 
       let mediaStream = null
       let pipStream = null
+      let pipStreamSource = null
       let pipCanvas = null
       let pipContext = null
       let pipFrameRequestId = null
+      let snapshotContext = null
+      let timedRefreshTimeoutId = null
+      let timedRefreshToken = 0
       let requestToken = 0
       const supportsCanvasCapture = typeof HTMLCanvasElement.prototype.captureStream === 'function'
       const useCanvasPipSource = supportsCanvasCapture && !pipCapabilities.webkit
 
+      function shouldUseSnapshotPip() {
+        return stateModel.refreshIntervalMs > 0 && supportsCanvasCapture
+      }
+
       function getPiPElement() {
+        if (shouldUseSnapshotPip()) {
+          return el.pipSource
+        }
         return useCanvasPipSource ? el.pipSource : el.video
       }
 
       function getPiPElementInPip() {
-        if (pipCapabilities.standard && document.pictureInPictureElement === getPiPElement()) {
-          return true
+        if (pipCapabilities.standard && document.pictureInPictureElement) {
+          return (
+            document.pictureInPictureElement === el.video ||
+            document.pictureInPictureElement === el.pipSource
+          )
         }
 
         return (
-          pipCapabilities.webkit && el.video.webkitPresentationMode === 'picture-in-picture'
+          pipCapabilities.webkit &&
+          (el.video.webkitPresentationMode === 'picture-in-picture' ||
+            el.pipSource.webkitPresentationMode === 'picture-in-picture')
+        )
+      }
+
+      function isPipSourceInPip() {
+        if (pipCapabilities.standard && document.pictureInPictureElement) {
+          return document.pictureInPictureElement === el.pipSource
+        }
+
+        return (
+          pipCapabilities.webkit && el.pipSource.webkitPresentationMode === 'picture-in-picture'
         )
       }
 
@@ -336,11 +501,14 @@
           return
         }
 
-        if (
-          pipCapabilities.webkit &&
-          el.video.webkitPresentationMode === 'picture-in-picture'
-        ) {
-          el.video.webkitSetPresentationMode('inline')
+        if (pipCapabilities.webkit) {
+          if (el.video.webkitPresentationMode === 'picture-in-picture') {
+            el.video.webkitSetPresentationMode('inline')
+          }
+
+          if (el.pipSource.webkitPresentationMode === 'picture-in-picture') {
+            el.pipSource.webkitSetPresentationMode('inline')
+          }
         }
       }
 
@@ -390,7 +558,7 @@
       }
 
       function startPipRenderLoop() {
-        if (!useCanvasPipSource || pipFrameRequestId !== null) {
+        if (pipFrameRequestId !== null || !useCanvasPipSource || pipStreamSource !== 'pipCanvas') {
           return
         }
 
@@ -403,10 +571,6 @@
       }
 
       function stopPipStream() {
-        if (!useCanvasPipSource) {
-          return
-        }
-
         stopPipRenderLoop()
 
         if (pipStream) {
@@ -414,11 +578,36 @@
           pipStream = null
         }
 
+        pipStreamSource = null
         el.pipSource.pause()
         el.pipSource.srcObject = null
       }
 
       async function ensurePipSourceReady() {
+        if (shouldUseSnapshotPip()) {
+          const canvasReady = ensureSnapshotCanvasSize()
+          if (!canvasReady) {
+            return false
+          }
+
+          if (pipStreamSource !== 'snapshot' || !pipStream || !streamHasLiveTrack(pipStream)) {
+            stopPipStream()
+            pipStream = el.snapshot.captureStream(30)
+            pipStreamSource = 'snapshot'
+            el.pipSource.srcObject = pipStream
+          }
+
+          if (el.pipSource.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+            try {
+              await el.pipSource.play()
+            } catch (error) {
+              return false
+            }
+          }
+
+          return true
+        }
+
         if (el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
           return false
         }
@@ -434,8 +623,10 @@
           return false
         }
 
-        if (!pipStream || !streamHasLiveTrack(pipStream)) {
+        if (pipStreamSource !== 'pipCanvas' || !pipStream || !streamHasLiveTrack(pipStream)) {
+          stopPipStream()
           pipStream = pipCanvas.captureStream(30)
+          pipStreamSource = 'pipCanvas'
           el.pipSource.srcObject = pipStream
         }
 
@@ -475,6 +666,253 @@
         }
       }
 
+      function getSnapshotContext() {
+        if (snapshotContext) {
+          return snapshotContext
+        }
+        snapshotContext = el.snapshot.getContext('2d')
+        return snapshotContext
+      }
+
+      function ensureSnapshotCanvasSize() {
+        const ctx = getSnapshotContext()
+        if (!ctx) {
+          return false
+        }
+
+        const rect = el.snapshot.getBoundingClientRect()
+        const pixelRatio = window.devicePixelRatio || 1
+        const width = Math.max(1, Math.round(rect.width * pixelRatio))
+        const height = Math.max(1, Math.round(rect.height * pixelRatio))
+
+        if (el.snapshot.width !== width || el.snapshot.height !== height) {
+          el.snapshot.width = width
+          el.snapshot.height = height
+        }
+
+        return true
+      }
+
+      function drawSnapshotFrame() {
+        if (!stateModel.videoReady) {
+          return
+        }
+
+        const ctx = getSnapshotContext()
+        if (!ctx) {
+          return
+        }
+
+        const canvasReady = ensureSnapshotCanvasSize()
+        if (!canvasReady) {
+          return
+        }
+
+        const vw = el.video.videoWidth
+        const vh = el.video.videoHeight
+        if (!vw || !vh) {
+          return
+        }
+
+        const cw = el.snapshot.width
+        const ch = el.snapshot.height
+        const scale = Math.min(cw / vw, ch / vh)
+        const dw = vw * scale
+        const dh = vh * scale
+        const dx = (cw - dw) / 2
+        const dy = (ch - dh) / 2
+
+        ctx.save()
+        ctx.clearRect(0, 0, cw, ch)
+
+        if (stateModel.previewMirrored) {
+          ctx.translate(cw, 0)
+          ctx.scale(-1, 1)
+          ctx.drawImage(el.video, cw - dx - dw, dy, dw, dh)
+        } else {
+          ctx.drawImage(el.video, dx, dy, dw, dh)
+        }
+
+        ctx.restore()
+      }
+
+      function flipSnapshotCanvasHorizontally() {
+        const ctx = getSnapshotContext()
+        if (!ctx) {
+          return
+        }
+
+        const cw = el.snapshot.width
+        const ch = el.snapshot.height
+        if (!cw || !ch) {
+          return
+        }
+
+        const temp = document.createElement('canvas')
+        temp.width = cw
+        temp.height = ch
+        const tempCtx = temp.getContext('2d')
+        if (!tempCtx) {
+          return
+        }
+
+        tempCtx.drawImage(el.snapshot, 0, 0)
+
+        ctx.save()
+        ctx.clearRect(0, 0, cw, ch)
+        ctx.translate(cw, 0)
+        ctx.scale(-1, 1)
+        ctx.drawImage(temp, 0, 0)
+        ctx.restore()
+      }
+
+      function clearTimedRefreshTimer() {
+        if (timedRefreshTimeoutId !== null) {
+          clearTimeout(timedRefreshTimeoutId)
+          timedRefreshTimeoutId = null
+        }
+      }
+
+      function stopTimedRefresh({ clearLastFrame = false } = {}) {
+        timedRefreshToken++
+        clearTimedRefreshTimer()
+        stateModel.timedRefreshActive = false
+        stateModel.captureInProgress = false
+        if (clearLastFrame) {
+          stateModel.lastCaptureAt = null
+          const ctx = getSnapshotContext()
+          if (ctx) {
+            ctx.clearRect(0, 0, el.snapshot.width, el.snapshot.height)
+          }
+        }
+        el.app?.classList.remove('is-snapshot-mode')
+        render()
+      }
+
+      function startTimedRefresh() {
+        if (stateModel.refreshIntervalMs <= 0) {
+          return
+        }
+
+        const token = ++timedRefreshToken
+        clearTimedRefreshTimer()
+        stateModel.timedRefreshActive = true
+        el.app?.classList.add('is-snapshot-mode')
+        render()
+
+        const scheduleNext = (delayMs) => {
+          if (token !== timedRefreshToken) {
+            return
+          }
+          timedRefreshTimeoutId = window.setTimeout(() => {
+            timedRefreshTimeoutId = null
+            runTimedRefreshTick(token).catch(() => {
+              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+            })
+          }, delayMs)
+        }
+
+        scheduleNext(0)
+      }
+
+      function waitForVideoReady({ timeoutMs = 2500 } = {}) {
+        if (stateModel.videoReady && el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+          return Promise.resolve(true)
+        }
+
+        return new Promise((resolve) => {
+          const timeoutId = window.setTimeout(() => {
+            cleanup()
+            resolve(false)
+          }, timeoutMs)
+
+          const onLoaded = () => {
+            cleanup()
+            resolve(true)
+          }
+
+          const cleanup = () => {
+            clearTimeout(timeoutId)
+            el.video.removeEventListener('loadeddata', onLoaded)
+          }
+
+          el.video.addEventListener('loadeddata', onLoaded, { once: true })
+        })
+      }
+
+      async function runTimedRefreshTick(token) {
+        if (token !== timedRefreshToken) {
+          return
+        }
+
+        if (stateModel.refreshIntervalMs <= 0) {
+          return
+        }
+
+        if (document.visibilityState === 'hidden' && !getPiPElementInPip()) {
+          const delay = Math.max(500, stateModel.refreshIntervalMs)
+          timedRefreshTimeoutId = window.setTimeout(() => {
+            timedRefreshTimeoutId = null
+            runTimedRefreshTick(token).catch(() => {
+              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+            })
+          }, delay)
+          return
+        }
+
+        stateModel.captureInProgress = true
+        render()
+
+        try {
+          await startCamera()
+          const ready = await waitForVideoReady()
+          if (!ready || token !== timedRefreshToken) {
+            return
+          }
+
+          drawSnapshotFrame()
+          stateModel.lastCaptureAt = new Date()
+        } finally {
+          stateModel.captureInProgress = false
+          render()
+        }
+
+        if (token !== timedRefreshToken) {
+          return
+        }
+
+        if (stateModel.releaseAfterCapture) {
+          await stopCamera({ keepErrorState: true, preservePiP: isPipSourceInPip() })
+        }
+
+        timedRefreshTimeoutId = window.setTimeout(() => {
+          timedRefreshTimeoutId = null
+          runTimedRefreshTick(token).catch(() => {
+            setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+          })
+        }, stateModel.refreshIntervalMs)
+      }
+
+      function applyRefreshConfig({ intervalMs, releaseAfterCapture }) {
+        const normalizedInterval =
+          Number.isFinite(intervalMs) ? Math.max(0, Math.trunc(intervalMs)) : 0
+        stateModel.refreshIntervalMs = normalizedInterval
+        stateModel.releaseAfterCapture = Boolean(releaseAfterCapture)
+
+        el.refreshIntervalInput.value = String(stateModel.refreshIntervalMs)
+        el.releaseAfterCaptureInput.checked = stateModel.releaseAfterCapture
+
+        if (stateModel.refreshIntervalMs <= 0) {
+          stopTimedRefresh()
+          startCamera().catch(() => {
+            setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+          })
+          return
+        }
+
+        startTimedRefresh()
+      }
+
       function mapGetUserMediaError(error) {
         switch (error?.name) {
           case 'NotAllowedError':
@@ -500,12 +938,16 @@
         return { ok: true, errorCode: null }
       }
 
-      async function stopCamera({ reason = null, keepErrorState = false } = {}) {
+      async function stopCamera({
+        reason = null,
+        keepErrorState = false,
+        preservePiP = false,
+      } = {}) {
         const token = ++requestToken
         setActionLock(false)
         const streamToStop = mediaStream
 
-        if (getPiPElementInPip()) {
+        if (!preservePiP && getPiPElementInPip()) {
           try {
             await exitPictureInPictureIfActive()
           } catch (error) {
@@ -529,7 +971,9 @@
 
         el.video.pause()
         el.video.srcObject = null
-        stopPipStream()
+        if (!preservePiP && pipStreamSource === 'pipCanvas') {
+          stopPipStream()
+        }
         setVideoReady(false)
 
         if (!keepErrorState) {
@@ -609,7 +1053,13 @@
           return
         }
 
-        if (!stateModel.videoReady || !mediaStream) {
+        const timedRefreshMode = stateModel.refreshIntervalMs > 0
+        if (timedRefreshMode && !supportsCanvasCapture) {
+          setState(State.ERROR, { errorCode: ErrorCode.CAPTURESTREAM_NOT_SUPPORTED })
+          return
+        }
+
+        if (!timedRefreshMode && (!stateModel.videoReady || !mediaStream)) {
           setState(State.ERROR, { errorCode: ErrorCode.PIP_NOT_READY })
           return
         }
@@ -622,7 +1072,7 @@
             return
           }
 
-          if (el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+          if (!timedRefreshMode && el.video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
             setState(State.ERROR, { errorCode: ErrorCode.PIP_NOT_READY })
             return
           }
@@ -647,8 +1097,15 @@
 
       function toggleMirrorPreview() {
         stateModel.previewMirrored = !stateModel.previewMirrored
-        if (getPiPElementInPip()) {
+        if (getPiPElementInPip() && pipStreamSource === 'pipCanvas') {
           drawPipFrame()
+        }
+        if (stateModel.timedRefreshActive) {
+          if (stateModel.videoReady) {
+            drawSnapshotFrame()
+          } else {
+            flipSnapshotCanvasHorizontally()
+          }
         }
         render()
       }
@@ -677,6 +1134,15 @@
           })
         })
 
+        el.refreshForm.addEventListener('submit', (event) => {
+          event.preventDefault()
+          const intervalMs = Number.parseInt(el.refreshIntervalInput.value, 10)
+          applyRefreshConfig({
+            intervalMs: Number.isFinite(intervalMs) ? intervalMs : 0,
+            releaseAfterCapture: el.releaseAfterCaptureInput.checked,
+          })
+        })
+
         document.addEventListener('keydown', (event) => {
           if (event.repeat || isKeyboardInputTarget(event.target)) {
             return
@@ -698,6 +1164,12 @@
 
         el.video.addEventListener('loadeddata', () => {
           setVideoReady(el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA)
+        })
+
+        window.addEventListener('resize', () => {
+          if (stateModel.timedRefreshActive) {
+            drawSnapshotFrame()
+          }
         })
 
         const handleEnterPiP = () => {
@@ -726,13 +1198,21 @@
         el.video.addEventListener('leavepictureinpicture', handleLeavePiP)
         el.pipSource.addEventListener('enterpictureinpicture', handleEnterPiP)
         el.pipSource.addEventListener('leavepictureinpicture', handleLeavePiP)
-        el.video.addEventListener('webkitpresentationmodechanged', () => {
-          if (el.video.webkitPresentationMode === 'picture-in-picture') {
+
+        const handleWebkitPresentationModeChange = (targetVideo) => {
+          if (targetVideo.webkitPresentationMode === 'picture-in-picture') {
             handleEnterPiP()
             return
           }
 
           handleLeavePiP()
+        }
+
+        el.video.addEventListener('webkitpresentationmodechanged', () => {
+          handleWebkitPresentationModeChange(el.video)
+        })
+        el.pipSource.addEventListener('webkitpresentationmodechanged', () => {
+          handleWebkitPresentationModeChange(el.pipSource)
         })
 
         document.addEventListener('visibilitychange', () => {
@@ -742,6 +1222,10 @@
               return
             }
 
+            if (stateModel.timedRefreshActive) {
+              clearTimedRefreshTimer()
+            }
+
             stopCamera({ reason: 'HIDDEN_RELEASED' }).catch(() => {
               setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
             })
@@ -749,13 +1233,18 @@
           }
 
           if (document.visibilityState === 'visible') {
-            startCamera().catch(() => {
-              setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
-            })
+            if (stateModel.timedRefreshActive) {
+              startTimedRefresh()
+            } else {
+              startCamera().catch(() => {
+                setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
+              })
+            }
           }
         })
 
         window.addEventListener('beforeunload', () => {
+          stopTimedRefresh()
           if (mediaStream) {
             stopTracks(mediaStream)
             mediaStream = null
@@ -774,7 +1263,14 @@
             setState(State.INIT)
           }
 
-          await startCamera()
+          applyRefreshConfig({
+            intervalMs: Number.parseInt(el.refreshIntervalInput.value, 10) || 0,
+            releaseAfterCapture: el.releaseAfterCaptureInput.checked,
+          })
+
+          if (stateModel.refreshIntervalMs <= 0) {
+            await startCamera()
+          }
         } catch (error) {
           setState(State.ERROR, { errorCode: ErrorCode.UNKNOWN_ERROR })
         }

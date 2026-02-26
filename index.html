@@ -194,7 +194,7 @@
             class="checkbox"
             title="开启后每次抓帧会关闭摄像头；适合很长的刷新间隔（例如 10 秒）"
           >
-            <input id="releaseAfterCaptureInput" type="checkbox" checked />
+            <input id="releaseAfterCaptureInput" type="checkbox" />
             拍完关闭摄像头
           </label>
           <button id="applyRefreshButton" type="submit">应用</button>
@@ -431,6 +431,32 @@
         return stateModel.refreshIntervalMs > 0 && supportsCanvasCapture
       }
 
+      function safeCanvasCaptureStream(canvas, frameRate) {
+        if (!canvas || typeof canvas.captureStream !== 'function') {
+          return null
+        }
+
+        if (!Number.isFinite(frameRate) || frameRate <= 0) {
+          try {
+            return canvas.captureStream()
+          } catch (error) {
+            return null
+          }
+        }
+
+        // Safari (and some WebKit builds) may throw when passing a frameRate argument.
+        // Fall back to the default captureStream() behavior.
+        try {
+          return canvas.captureStream(frameRate)
+        } catch (error) {
+          try {
+            return canvas.captureStream()
+          } catch (fallbackError) {
+            return null
+          }
+        }
+      }
+
       function getPiPElement() {
         if (shouldUseSnapshotPip()) {
           return el.pipSource
@@ -592,7 +618,10 @@
 
           if (pipStreamSource !== 'snapshot' || !pipStream || !streamHasLiveTrack(pipStream)) {
             stopPipStream()
-            pipStream = el.snapshot.captureStream(30)
+            pipStream = safeCanvasCaptureStream(el.snapshot, 30)
+            if (!pipStream) {
+              return false
+            }
             pipStreamSource = 'snapshot'
             el.pipSource.srcObject = pipStream
           }
@@ -625,7 +654,10 @@
 
         if (pipStreamSource !== 'pipCanvas' || !pipStream || !streamHasLiveTrack(pipStream)) {
           stopPipStream()
-          pipStream = pipCanvas.captureStream(30)
+          pipStream = safeCanvasCaptureStream(pipCanvas, 30)
+          if (!pipStream) {
+            return false
+          }
           pipStreamSource = 'pipCanvas'
           el.pipSource.srcObject = pipStream
         }
@@ -815,8 +847,17 @@
         scheduleNext(0)
       }
 
+      function isVideoFrameReady() {
+        return (
+          stateModel.videoReady &&
+          el.video.readyState >= HTMLMediaElement.HAVE_METADATA &&
+          el.video.videoWidth > 0 &&
+          el.video.videoHeight > 0
+        )
+      }
+
       function waitForVideoReady({ timeoutMs = 2500 } = {}) {
-        if (stateModel.videoReady && el.video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
+        if (isVideoFrameReady()) {
           return Promise.resolve(true)
         }
 
@@ -826,17 +867,30 @@
             resolve(false)
           }, timeoutMs)
 
-          const onLoaded = () => {
-            cleanup()
-            resolve(true)
+          let rafId = null
+
+          const check = () => {
+            if (isVideoFrameReady()) {
+              cleanup()
+              resolve(true)
+              return
+            }
+            rafId = requestAnimationFrame(check)
           }
 
           const cleanup = () => {
             clearTimeout(timeoutId)
-            el.video.removeEventListener('loadeddata', onLoaded)
+            if (rafId !== null) {
+              cancelAnimationFrame(rafId)
+              rafId = null
+            }
+            el.video.removeEventListener('loadedmetadata', check)
+            el.video.removeEventListener('loadeddata', check)
           }
 
-          el.video.addEventListener('loadeddata', onLoaded, { once: true })
+          el.video.addEventListener('loadedmetadata', check)
+          el.video.addEventListener('loadeddata', check)
+          rafId = requestAnimationFrame(check)
         })
       }
 

@@ -16,7 +16,7 @@
 ## 使用方法
 
 访问
-<https://aaarynt.github.io/web-video/>
+<https://aaarynt.github.io/Camera-Preview-on-Browser/>
 
 或
 
